@@ -1,0 +1,41 @@
+name: Конкурсные списки МАИ
+
+on:
+  schedule:
+    # Каждые 5 минут. GitHub исполняет расписание с задержкой — реальный
+    # интервал обычно 5–20 минут, это нормально.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# Прогоны не должны накладываться друг на друга: они пишут в один history.csv.
+concurrency:
+  group: rating
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Проверить позицию
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python3 mai_rating.py --once --no-notify --ukp "${{ secrets.UKP }}"
+
+      - name: Сохранить историю
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history.csv
+          git diff --quiet --staged && exit 0
+          git commit -m "история: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git pull --rebase --autostash
+          git push
