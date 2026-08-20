@@ -4,6 +4,7 @@
 в каждой таблице (см. tests/fixtures/).
 """
 
+import argparse
 import csv
 import os
 import sys
@@ -244,6 +245,100 @@ class TelegramTest(unittest.TestCase):
         ok = mr.send_telegram("123:ABC", "555", "текст", post=failing_post)
 
         self.assertFalse(ok)
+
+
+class TestNotificationTest(unittest.TestCase):
+    def test_sends_a_test_message_when_credentials_are_set(self):
+        sent = []
+        env = {"TG_BOT_TOKEN": "123:ABC", "TG_CHAT_ID": "555"}
+
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            with unittest.mock.patch.object(mr, "send_telegram", lambda *a, **k: sent.append(a) or True):
+                code = mr.main(["--test-notify", "--no-notify"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(sent[0][0], "123:ABC")
+        self.assertTrue(sent[0][2])
+
+    def test_fails_when_credentials_are_missing(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            code = mr.main(["--test-notify", "--no-notify"])
+
+        self.assertEqual(code, 1)
+
+    def test_does_not_require_ukp(self):
+        env = {"TG_BOT_TOKEN": "123:ABC", "TG_CHAT_ID": "555"}
+
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            with unittest.mock.patch.object(mr, "send_telegram", lambda *a, **k: True):
+                code = mr.main(["--test-notify", "--no-notify"])
+
+        self.assertEqual(code, 0)
+
+
+class ReportTest(unittest.TestCase):
+    """Сообщение уходит после каждой проверки: тихое, если ничего не изменилось."""
+
+    def setUp(self):
+        self.args = argparse.Namespace(ukp="1560740", no_notify=True)
+        self.standing = mr.Standing(
+            ukp="1560740", rank=116, total=200, places=200, section="общий",
+            score="94", priority="1", consent=True, enrolled=False,
+            generated_at="20.08.2026 16:52:26",
+        )
+        self.moved = mr.Standing(**{**vars(self.standing), "rank": 97})
+
+    def _capture(self, previous, current):
+        sent = []
+        env = {"TG_BOT_TOKEN": "123:ABC", "TG_CHAT_ID": "555"}
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            with unittest.mock.patch.object(
+                mr, "send_telegram", lambda *a, **k: sent.append((a, k)) or True
+            ):
+                mr.report(self.args, previous, current)
+        return sent
+
+    def test_unchanged_position_is_sent_silently(self):
+        sent = self._capture(self.standing, self.standing)
+
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0][1]["silent"])
+        self.assertIn("место 116", sent[0][0][2])
+
+    def test_changed_position_is_sent_with_sound(self):
+        sent = self._capture(self.standing, self.moved)
+
+        self.assertFalse(sent[0][1]["silent"])
+        self.assertIn("116 → 97", sent[0][0][2])
+
+    def test_disappearing_from_the_list_is_sent_with_sound(self):
+        sent = self._capture(self.standing, None)
+
+        self.assertFalse(sent[0][1]["silent"])
+
+    def test_nothing_is_sent_without_credentials(self):
+        sent = []
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            with unittest.mock.patch.object(
+                mr, "send_telegram", lambda *a, **k: sent.append(a) or True
+            ):
+                mr.report(self.args, self.standing, self.standing)
+
+        self.assertEqual(sent, [])
+
+
+class SilentFlagTest(unittest.TestCase):
+    def test_silent_message_asks_telegram_to_skip_the_sound(self):
+        sent = []
+        mr.send_telegram("123:ABC", "555", "текст", silent=True, post=lambda u, d: sent.append(d))
+
+        self.assertEqual(sent[0]["disable_notification"], "true")
+
+    def test_loud_message_does_not_disable_notification(self):
+        sent = []
+        mr.send_telegram("123:ABC", "555", "текст", post=lambda u, d: sent.append(d))
+
+        self.assertNotIn("disable_notification", sent[0])
 
 
 class HistoryReadTest(unittest.TestCase):

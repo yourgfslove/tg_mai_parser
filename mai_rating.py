@@ -355,10 +355,17 @@ def _post_form(url: str, data: dict) -> None:
         pass
 
 
-def send_telegram(token: str, chat_id: str, text: str, post=_post_form) -> bool:
-    """Сообщение в Telegram. Падение сети не должно ронять проверку."""
+def send_telegram(token: str, chat_id: str, text: str, silent: bool = False, post=_post_form) -> bool:
+    """Сообщение в Telegram. Падение сети не должно ронять проверку.
+
+    silent=True — сообщение приходит без звука и без всплывающего уведомления
+    (так шлются рутинные отчёты «ничего не изменилось»).
+    """
+    data = {"chat_id": chat_id, "text": text}
+    if silent:
+        data["disable_notification"] = "true"
     try:
-        post(f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": chat_id, "text": text})
+        post(f"https://api.telegram.org/bot{token}/sendMessage", data)
         return True
     except Exception as error:  # noqa: BLE001 — уведомление не важнее самой проверки
         log(f"не удалось отправить в Telegram: {error}")
@@ -392,13 +399,50 @@ def change_message(previous: Standing | None, current: Standing | None) -> str:
 # ─── цикл ───────────────────────────────────────────────────────────────────
 
 
-def announce(args, message: str) -> None:
-    log(f"ИЗМЕНЕНИЕ: {message}")
-    if not args.no_notify:
-        notify(f"МАИ · УКП {args.ukp}", message)
-    token, chat_id = os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID")
+def telegram_credentials() -> tuple[str, str]:
+    return os.environ.get("TG_BOT_TOKEN", ""), os.environ.get("TG_CHAT_ID", "")
+
+
+def report(args, previous: Standing | None, current: Standing | None) -> None:
+    """Итог проверки: в лог, в историю уже записано, в Telegram — всегда.
+
+    Рутинный отчёт уходит беззвучно, изменение — обычным сообщением со звуком.
+    Уведомление на рабочий стол показывается только при изменении.
+    """
+    changed = has_changed(previous, current)
+    line = current.describe() if current else "УКП не найден в списке с текущими фильтрами"
+    log(line)
+
+    if changed:
+        message = change_message(previous, current)
+        log(f"ИЗМЕНЕНИЕ: {message}")
+        text = f"МАИ · УКП {args.ukp}\n{message}\n{line}"
+        if not args.no_notify:
+            notify(f"МАИ · УКП {args.ukp}", message)
+    else:
+        text = f"МАИ · УКП {args.ukp}\nбез изменений · {line}"
+
+    token, chat_id = telegram_credentials()
     if token and chat_id:
-        send_telegram(token, chat_id, f"МАИ · УКП {args.ukp}\n{message}")
+        send_telegram(token, chat_id, text, silent=not changed)
+    elif changed:
+        log("Telegram пропущен: не заданы TG_BOT_TOKEN и TG_CHAT_ID")
+
+
+def run_test_notification(args) -> int:
+    """Проверка каналов уведомлений без ожидания настоящего изменения."""
+    message = "Проверка связи: парсер конкурсных списков МАИ настроен верно."
+    log(message)
+    if not args.no_notify:
+        notify("МАИ · проверка связи", message)
+    token, chat_id = telegram_credentials()
+    if not (token and chat_id):
+        log("не заданы TG_BOT_TOKEN и TG_CHAT_ID — отправлять некуда")
+        return 1
+    if not send_telegram(token, chat_id, message):
+        return 1
+    log("сообщение отправлено в Telegram")
+    return 0
 
 
 def run(args) -> int:
@@ -408,13 +452,9 @@ def run(args) -> int:
     while True:
         try:
             standing = check_once(ukp=args.ukp, filters=frozenset(args.filters))
-            if standing is None:
-                log(f"УКП {args.ukp} не найден в списке с текущими фильтрами")
-            else:
-                log(standing.describe())
+            if standing is not None:
                 append_history(args.csv, standing)
-            if has_changed(previous, standing):
-                announce(args, change_message(previous, standing))
+            report(args, previous, standing)
             previous = standing
         except urllib.error.HTTPError as error:
             log(f"HTTP {error.code} при запросе {error.url} — пробую в следующий раз")
@@ -448,7 +488,14 @@ def main(argv=None) -> int:
         choices=sorted(FILTER_CLASSES),
         help="галочки «Отбор» (по умолчанию prior — высший проходной приоритет)",
     )
+    parser.add_argument(
+        "--test-notify",
+        action="store_true",
+        help="отправить тестовое уведомление и выйти",
+    )
     args = parser.parse_args(argv)
+    if args.test_notify:
+        return run_test_notification(args)
     if not args.ukp:
         parser.error("не задан УКП: укажите --ukp 1234567 или переменную окружения UKP")
     try:
